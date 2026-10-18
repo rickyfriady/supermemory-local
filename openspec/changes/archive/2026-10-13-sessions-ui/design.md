@@ -53,7 +53,7 @@ The live check runs twice: when the request arrives and again right before the m
 
 ### D5. Linking memories
 For each project group, resolve the container tag with `resolveProject(cwd)` and call `listDocuments` once; match `metadata.session` to session ids. Excerpts (`getDocument`) are fetched lazily when a session is expanded. If the memory server is down, the response marks memories as unavailable.
-Optional memory deletion uses `client.request('DELETE', '/v3/documents/:id')` per note and reports each result (409 while a note is still processing).
+Optional memory deletion uses `client.request('DELETE', '/v3/documents/:id')` per note and reports each result (409 while a note is still processing). Checked against the running server: a successful DELETE answers `204` with an empty body, which `SupermemoryClient.request` used to report as a JSON parse error; the client now accepts empty bodies (hooks only use JSON endpoints, so they are unaffected).
 
 ### D6. Server hardening
 `Bun.serve` on `127.0.0.1` only. Every request: check `Host` equals `127.0.0.1:<port>` or `localhost:<port>`; state-changing requests also require `Origin` equal to the server origin; every `/api` call requires the per-run token (random 32 bytes, injected into the served page). Responses carry `Content-Security-Policy` with a per-response script nonce and `default-src 'none'`, so the page cannot load anything external. The page writes transcript-derived text with `textContent` only (never `innerHTML`), because titles and prompts are untrusted.
@@ -62,7 +62,8 @@ Optional memory deletion uses `client.request('DELETE', '/v3/documents/:id')` pe
 - `bin/sessions-ui.ts`: entry, wires config and starts the server.
 - `src/sessions-scan.ts`: transcript parsing, live detection, catalog and cache. Pure parsing functions are exported for tests.
 - `src/sessions-actions.ts`: pending-action state machine, terminal approval, trash, sidecar, audit log. Takes the filesystem roots and the prompt function as arguments so tests can use temp directories and a fake prompt.
-- `src/sessions-server.ts`: routes, security checks, and the single-file page (HTML, CSS, JS as one string, no build step).
+- `src/sessions-server.ts`: routes and security checks.
+- `src/sessions-page.ts`: the single-file page (HTML, CSS, JS as one string, no build step), kept apart so the server file stays readable.
 - `package.json` gets `"sessions": "bun --env-file=.env bin/sessions-ui.ts"`. `--env-file` follows the existing rule for entry points; `SESSIONS_UI_PORT` is added to `.env.example`.
 
 ### D8. Resume and new-session commands are text only
