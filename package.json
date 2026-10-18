@@ -13,6 +13,7 @@
 		"start": "bash scripts/start.sh",
 		"stop": "bash scripts/stop.sh",
 		"status": "bash scripts/status.sh",
+		"sessions": "bun --env-file=.env bin/sessions-ui.ts",
 		"install-hooks": "bun src/installer.ts install",
 		"uninstall-hooks": "bun src/installer.ts uninstall",
 		"test-memory": "bun src/test-memory.ts",
