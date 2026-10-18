@@ -46,13 +46,18 @@ supermemory-local/
 ├── tsconfig.json            # Konfigurasi TypeScript (bun run typecheck)
 ├── prettier.config.ts       # Format kode (extends @irfnd/prettier-config), bun run format
 ├── bin/
-│   └── supermemory-hook.ts  # Entrypoint hook CLI serbaguna untuk semua agent
+│   ├── supermemory-hook.ts  # Entrypoint hook CLI serbaguna untuk semua agent
+│   └── sessions-ui.ts       # Entrypoint halaman daftar sesi Claude Code (bun run sessions)
 ├── data/                    # Log + database lokal
 │   ├── stores/<model>-<dim>d/ # Satu database per model embedding (api-key, embedding-plan.json, models/ untuk model lokal, ...)
 │   ├── current -> stores/…  # Symlink ke store aktif (dibuat start.sh)
 │   ├── supermemory.log      # Log runtime server
 │   ├── llm-proxy.log        # Log proxy LLM (status & durasi per request)
-│   └── zed-adapter.log      # Log adapter Zed
+│   ├── zed-adapter.log      # Log adapter Zed
+│   ├── sessions-trash/      # Sesi Claude yang dihapus lewat Sessions UI (bisa di-restore)
+│   ├── opencode-trash/      # Backup (JSON) sesi OpenCode yang dihapus lewat Sessions UI (bisa di-restore)
+│   ├── sessions-meta.json   # Nama & tag sesi (sidecar, transkrip tidak diubah)
+│   └── sessions-ui.log      # Audit tiap aksi Sessions UI (disetujui/ditolak/kedaluwarsa)
 ├── scripts/
 │   ├── start.sh             # Menjalankan 9router + llm-proxy + zed-adapter + supermemory-server (store sesuai model embedding)
 │   ├── stop.sh              # Menghentikan supermemory-server + llm-proxy + zed-adapter (--all: juga 9router)
@@ -65,7 +70,14 @@ supermemory-local/
     ├── opencode-plugin.ts   # Plugin native OpenCode (template)
     ├── llm-proxy.ts         # Proxy supermemory → 9router (stream:false di chat, dimensions di embeddings)
     ├── zed-adapter.ts       # Adapter Zed edit prediction: /v1/completions → 9router /chat/completions
+    ├── sessions-scan.ts     # Sessions UI: baca ~/.claude (read-only), sesi live, tautan memori
+    ├── sessions-actions.ts  # Sessions UI: antrean persetujuan terminal, soft delete/restore/purge, nama & tag
+    ├── sessions-other.ts    # Sessions UI: daftar sesi OpenCode & Antigravity (SQLite, dibuka read-only)
+    ├── opencode-cli.ts      # Sessions UI: pembungkus `opencode session export|delete|import` + deteksi proses OpenCode
+    ├── sessions-server.ts   # Sessions UI: server HTTP localhost + penjaga Host/Origin/token
+    ├── sessions-page.ts     # Sessions UI: halaman HTML (tanpa resource eksternal)
     ├── hooks.test.ts        # Unit test (bun test)
+    ├── sessions*.test.ts    # Unit test Sessions UI
     └── test-memory.ts       # Script verifikasi pembacaan & penulisan memori
 ```
 
@@ -196,8 +208,42 @@ bun run uninstall-hooks
 
 - **`PreInvocation`**: Mengeksekusi `supermemory-hook.ts antigravity start`. Mengembalikan objek JSON `{ "injectSteps": [{ "ephemeralMessage": "<supermemory-context>..." }] }` sehingga memori project otomatis disuntikkan sebelum model memproses instruksi.
 - **`PostToolUse`** (matcher `write_to_file|replace_file_content|run_command`): Mencatat eksekusi tool ke Supermemory dan mengembalikan `{}`. Command read-only (`ls`, `cat`, `git status`, dll.) diabaikan agar memori tidak penuh noise.
-- **`Stop`**: Menyimpan checkpoint ringkasan sesi.
+- **`Stop`**: Menyimpan balasan terakhir asisten (`assistant_response` / `message`, maks. 4000 karakter; diterjemahkan ke bahasa Inggris lewat `TRANSLATE_MODEL` jika perlu) sebagai `session_summary`.
 - Antigravity tidak punya hook compaction (hanya `PreInvocation`, `PostInvocation`, `PreToolUse`, `PostToolUse`, `SessionStart`), jadi ringkasan compaction-nya tidak bisa ditangkap. `Stop` tetap menyimpan balasan terakhir di setiap giliran.
+
+#### Menyambungkan ke `agy` (Antigravity CLI)
+
+Ringkasan hook yang dipasang installer di `~/.gemini/config/hooks.json` (satu entri bernama `supermemory-local`, `enabled: true`, timeout 15 detik per hook):
+
+| Event agy       | Matcher                                            | Action               | Stdout                                                                                                           |
+| --------------- | -------------------------------------------------- | -------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `PreInvocation` | semua                                              | `antigravity start`  | `{"injectSteps":[{"ephemeralMessage":"<supermemory-context>…"}]}`, atau `{}` jika belum ada memori / server mati |
+| `PostToolUse`   | `write_to_file\|replace_file_content\|run_command` | `antigravity change` | selalu `{}`                                                                                                      |
+| `Stop`          | semua                                              | `antigravity stop`   | selalu `{}`                                                                                                      |
+
+Perintah yang dijalankan tiap hook (path absolut, ditulis installer):
+
+```bash
+"<bun>" --env-file="<repo>/.env" "<repo>/bin/supermemory-hook.ts" antigravity <start|change|stop>
+```
+
+Catatan:
+
+- `PreInvocation` jalan di **setiap giliran**, jadi konteks diambil ulang penuh tiap turn (tidak ada delta seperti `sync` di Claude Code/OpenCode). Tidak ada hook compaction di agy.
+- Hook lain di file yang sama (mis. entri `zentty`) tidak diubah installer; installer hanya mengganti entri `supermemory-local`. File di-backup ke `hooks.json.bak-<waktu>` sebelum ditulis.
+- Hook dibaca saat sesi agy dimulai: buka sesi baru setelah memasang. `bun run start` harus sudah berjalan, kalau tidak hook mengembalikan `{}`.
+- Payload yang dibaca: `workspacePaths[0]` (folder project), `toolCall.{name,args}` (`TargetFile`, `CommandLine`, `Description`), dan `assistant_response` / `message` (balasan terakhir). Tool `view_*`, `read_*`, `search_web`, `schedule` dan command read-only diabaikan.
+
+```bash
+bun run install-hooks antigravity     # pasang / pasang ulang
+bun run uninstall-hooks antigravity   # copot
+
+# tes manual tanpa agy (tampilkan konteks yang akan disuntikkan, lalu cek log):
+echo '{"workspacePaths":["'$PWD'"]}' | bun --env-file=.env bin/supermemory-hook.ts antigravity start
+grep -i antigravity ~/.supermemory-hook.log | tail
+```
+
+Jika setelah sesi agy berjalan tidak ada baris `agent=antigravity` baru di log, hook belum dipanggil: cek `~/.gemini/config/hooks.json` (harus ada `supermemory-local`), path `bun` di perintah masih valid, dan sesi agy dibuka ulang.
 
 ### C. OpenCode (`~/.config/opencode/plugins/supermemory-local.ts`)
 
@@ -228,6 +274,31 @@ Adapter mengirim `reasoning_effort` dari `ZED_ADAPTER_REASONING_EFFORT` (default
 ```
 
 > Pakai model tanpa thinking berat. `ag/gemini-3.8-flash-low` sekitar 3 detik per prediksi; varian `*-high` (mis. combo `pecut-ai`) 22–34 detik.
+
+---
+
+## 🗂️ Sessions UI (daftar sesi Claude Code, OpenCode, Antigravity)
+
+Halaman lokal untuk melihat semua sesi Claude Code di Mac ini (dari `~/.claude/projects`), dikelompokkan per project: judul, branch, waktu, ukuran, file yang diubah, PR, biaya, badge **live** untuk sesi yang sedang berjalan, dan memori supermemory yang ditulis sesi itu (dicocokkan lewat `metadata.session`).
+
+```bash
+bun run sessions        # buka http://127.0.0.1:20131 (port: SESSIONS_UI_PORT di .env)
+```
+
+Jalankan di terminal biasa dan biarkan terbuka: server berjalan di **foreground** dan tidak dijalankan oleh `bun run start`. Tanpa terminal interaktif server menolak start.
+
+**Persetujuan.** Browser hanya bisa _meminta_ aksi (hapus, restore, purge, ubah nama, tag). Aksi baru jalan setelah kamu menjawab `y` di terminal tempat server berjalan; tidak ada route HTTP yang bisa menyetujui, jadi halaman web lain atau agent yang memanggil `curl` tidak bisa menyetujui sendiri. Permintaan kedaluwarsa setelah 5 menit. Untuk hapus dan purge, browser juga meminta kamu mengetik 8 karakter pertama id sesi.
+
+- **Hapus = soft delete.** Transkrip, folder `<id>/` dan `~/.claude/file-history/<id>/` dipindah ke `data/sessions-trash/`; bisa di-_restore_ (ditolak jika ada file yang sudah ada di tujuan) atau di-_purge_ permanen. Sesi yang sedang live tidak bisa dihapus. Ada opsi terpisah (default mati) untuk ikut menghapus catatan supermemory sesi itu; catatan yang masih diproses (409) dilaporkan sebagai gagal tanpa membatalkan pemindahan file.
+- **Nama & tag** disimpan di `data/sessions-meta.json`. File transkrip tidak pernah diubah.
+- **Resume / sesi baru**: tombol _Copy_ menyalin perintah `cd <dir> && claude --resume <id>` (server tidak menjalankannya).
+- **Tab OpenCode & Antigravity.** Selain tab _Claude Code_, halaman punya tab **OpenCode** (dari `~/.local/share/opencode/opencode.db`, atau `$XDG_DATA_HOME/opencode/`; tabel `session_v2`, atau `session` untuk OpenCode lama) dan **Antigravity** (dari `~/.gemini/antigravity-cli/conversation_summaries.db`), dikelompokkan per folder kerja. Sesi sub-agent OpenCode, sesi yang di-archive, dan percakapan `agy` tanpa langkah disembunyikan (jumlahnya ditampilkan). Database keduanya dibuka `mode=ro` untuk membaca.
+  - **Rename & Tags** untuk OpenCode dan Antigravity: disimpan di `data/sessions-meta.json` (kunci `opencode:<id>` / `antigravity:<id>`), tidak menyentuh database mereka. Tetap perlu `y` di terminal.
+  - **Delete untuk OpenCode** (tidak ada untuk Antigravity). Server tidak pernah menulis SQL ke database OpenCode, karena database itu berisi dua generasi tabel (`session` dan `session_v2` beserta pesan dan event-nya) yang hanya dijaga konsisten oleh OpenCode sendiri. Urutannya: (1) tolak jika ada proses OpenCode berjalan (dicek saat permintaan dan sekali lagi tepat sebelum eksekusi); (2) `opencode session export` untuk sesi dan **semua sesi sub-agent-nya** (CLI ikut menghapus anak-anaknya), ditulis ke `data/opencode-trash/<ts>_<id>.json` (izin `600`, berisi transkrip) dan dibaca ulang; (3) baru `opencode session delete --standalone`; (4) diperiksa bahwa sesi benar-benar hilang dari OpenCode. Gagal di langkah mana pun tidak menghilangkan apa pun, dan backup yang sudah ditulis tidak dihapus oleh jalur gagal.
+  - **Restore & Purge** ada di tab _Trash_ (entri bertanda OpenCode): restore menjalankan `opencode session import` (induk dulu, id sama; waktu _updated_ jadi waktu restore) dan baru menghapus backup setelah semua sesi terbukti kembali. Restore yang setengah jalan bisa diulang: hanya sesi yang masih hilang yang diimpor. Purge menghapus file backup secara permanen.
+  - Tombol _Copy resume_ ada untuk OpenCode (`cd <dir> && opencode --session <id>`); `agy` belum karena perintah resume-nya belum diketahui. Kotak search berlaku di semua tab; filter project, urutan, dan _live only_ hanya untuk Claude Code.
+  - Binary yang dipakai adalah `opencode` asli pertama di `PATH` (wrapper shell Zentty dilewati); ganti dengan `OPENCODE_BIN` bila perlu.
+- Server hanya mendengarkan `127.0.0.1`, menolak `Host`/`Origin` asing, dan mewajibkan token acak per-run. Teks transkrip tidak dikirim ke mana pun (hanya id sesi ke server memori lokal).
 
 ---
 
@@ -322,5 +393,29 @@ for (const d of await c.listDocuments({ containerTags: [tag], limit: 100 }))
 - Log server supermemory: `./data/supermemory.log`
 - Log proxy LLM (status & durasi tiap request ke 9router): `./data/llm-proxy.log`
 - Log adapter Zed (model, status & durasi tiap prediksi): `./data/zed-adapter.log`
-- Log aktivitas hook: `~/.supermemory-hook.log`
+- Log aktivitas hook: `~/.supermemory-hook.log` (di **home directory**, bukan di folder repo; dipakai bersama oleh semua agent dan semua project)
 - Log gateway 9router: `~/.9router/logs/server.log`
+- Log Sessions UI (audit tiap aksi: disetujui, ditolak, kedaluwarsa): `./data/sessions-ui.log`
+
+#### Log hook (`~/.supermemory-hook.log`)
+
+Satu baris per kejadian, format `[waktu ISO UTC] pesan`. Hook sengaja tidak pernah menulis diagnostik ke stdout (stdout dipakai untuk menyuntikkan konteks), jadi log ini satu-satunya tempat melihat apa yang terjadi:
+
+```text
+Invoked: agent=antigravity, action=start          # hook dipanggil agent
+Project: supermemory-local (/path/ke/project), Agent: Antigravity
+Injected 33 context lines for project …           # konteks disuntikkan
+Saving session_summary (Antigravity): …           # catatan dikirim ke server
+Save failed: HTTP …  /  Translate failed (…)      # kegagalan (hook tetap exit 0, agent tidak terblokir)
+Supermemory server is not responding at …         # server mati: konteks kosong
+Hook error (agent action): …                      # exception tak terduga
+```
+
+```bash
+tail -f ~/.supermemory-hook.log                    # pantau langsung
+grep 'agent=antigravity' ~/.supermemory-hook.log | tail   # hanya agy (ganti dengan claude-code / opencode)
+grep -E 'failed|error|not responding' ~/.supermemory-hook.log | tail   # hanya masalah
+: > ~/.supermemory-hook.log                        # kosongkan (tidak ada rotasi otomatis, file terus membesar)
+```
+
+File lain yang dipakai hook: marker sinkronisasi per sesi di `$TMPDIR/supermemory-sync/<session>` (dan `<session>.seen`); hilang sendiri saat reboot.
