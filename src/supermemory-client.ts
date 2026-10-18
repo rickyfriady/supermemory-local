@@ -84,7 +84,9 @@ export class SupermemoryClient {
 			if (!res.ok) {
 				return { success: false, error: `HTTP ${res.status}: ${await res.text()}` };
 			}
-			return { success: true, data: (await res.json()) as T };
+			// DELETE /v3/documents/:id answers 204 with no body
+			const text = await res.text();
+			return { success: true, data: (text ? JSON.parse(text) : undefined) as T };
 		} catch (err) {
 			return { success: false, error: (err as Error).message };
 		}
