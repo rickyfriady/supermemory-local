@@ -7,8 +7,9 @@ import path from 'node:path';
 const PROJECT_ROOT = path.resolve(import.meta.dir, '..');
 const HOOK_BIN = path.join(PROJECT_ROOT, 'bin', 'supermemory-hook.ts');
 const ENV_FILE = path.join(PROJECT_ROOT, '.env');
-// Absolute bun path: GUI-launched agents (Antigravity) often lack ~/.bun/bin in PATH
-const BUN = process.execPath;
+// Absolute bun path: GUI-launched agents (Antigravity) often lack ~/.bun/bin in PATH. Use the PATH entry (a stable symlink,
+// e.g. /opt/homebrew/bin/bun), not process.execPath: under Homebrew that is the versioned Cellar dir, which `brew upgrade` deletes.
+const BUN = Bun.which('bun') ?? process.execPath;
 // Matches entries from this installer, including the old node/.js ones
 const MARKER = /supermemory-hook\.(js|ts)/;
 const HOME = os.homedir();
