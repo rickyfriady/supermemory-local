@@ -14,7 +14,7 @@ Memori diisolasi dan disimpan secara terpisah **berdasarkan folder / base reposi
 
 1. **Server Lokal, Model via 9router (bisa diganti kapan saja):**
    - **Embeddings:** Default-nya model lokal `Xenova/bge-base-en-v1.5` (ONNX bawaan server, 768 dimensi, ±106 MB, tanpa panggilan API). Model ini hanya memahami bahasa Inggris, jadi hook menerjemahkan prompt dan ringkasan sesi yang bukan bahasa Inggris lewat `TRANSLATE_MODEL` (model chat di 9router) sebelum dicari atau disimpan. Dengan begitu memori tetap bisa dicari lintas bahasa. Alternatifnya, model embedding multibahasa lewat 9router (`openai-compatible`, mis. `jina/jina-embeddings-v4` 1024 dimensi) dengan `TRANSLATE_MODEL` dikosongkan. Untuk jalur 9router, `llm-proxy` menambahkan `dimensions` (server hanya mengirimnya untuk `text-embedding-3-*`, sedangkan Jina v4 default 2048 dan Gemini 3072, melebihi batas pgvector 2000) dan melengkapi `usage.prompt_tokens` yang tidak dikirim Jina (tanpa itu server menolak respons sebagai "Invalid JSON response").
-   - **Storage per Model Embedding:** Database lokal tersimpan di `./data/stores/<model>-<dim>d/`, satu store per model embedding, dan `./data/current` menunjuk ke store aktif. Server mengunci satu folder data ke model yang pertama mengisinya, jadi `start.sh` memilih (atau membuat) store milik model di `.env`. Mengganti model cukup ubah `.env` lalu restart, dan kembali ke model lama memulihkan memorinya. Lihat [Mengganti Model](#mengganti-model).
+   - **Storage per Model Embedding:** Database lokal tersimpan di `./data/stores/<model>-<dim>d/`, satu store per model embedding, dan `./data/current` menunjuk ke store aktif. Server mengunci satu folder data ke model yang pertama mengisinya, jadi `scripts/run.sh` memilih (atau membuat) store milik model di `.env`. Mengganti model cukup ubah `.env` lalu restart, dan kembali ke model lama memulihkan memorinya. Lihat [Mengganti Model](#mengganti-model).
    - **Workflow Engine Direct:** Menggunakan `WORKFLOW_ENGINE=direct` sehingga proses ekstraksi dan relasi memori dieksekusi secara in-process langsung tanpa dependensi ke server worker eksternal.
    - **Model AI (LLM):** Ekstraksi memori memakai `OPENAI_MODEL` (mis. `ag/gemini-3.8-flash-low` atau `cc/claude-haiku-4-5-20251001`) lewat gateway lokal **9router** (`http://127.0.0.1:20128/v1`) dan proxy kecil `src/llm-proxy.ts` (port `20129`). Proxy ini menambahkan `"stream": false` ke request chat, karena supermemory tidak mengisi `stream` sedangkan 9router membalas dalam format streaming (SSE) jika `stream` kosong, yang membuat supermemory gagal mem-parsing JSON.
 
@@ -47,10 +47,11 @@ supermemory-local/
 ├── prettier.config.ts       # Format kode (extends @irfnd/prettier-config), bun run format
 ├── bin/
 │   ├── supermemory-hook.ts  # Entrypoint hook CLI serbaguna untuk semua agent
+│   ├── supermemory-mcp.ts   # Entrypoint server MCP stdio (search, add, profile)
 │   └── sessions-ui.ts       # Entrypoint halaman daftar sesi Claude Code (bun run sessions)
 ├── data/                    # Log + database lokal
 │   ├── stores/<model>-<dim>d/ # Satu database per model embedding (api-key, embedding-plan.json, models/ untuk model lokal, ...)
-│   ├── current -> stores/…  # Symlink ke store aktif (dibuat start.sh)
+│   ├── current -> stores/…  # Symlink ke store aktif (dibuat run.sh)
 │   ├── supermemory.log      # Log runtime server
 │   ├── llm-proxy.log        # Log proxy LLM (status & durasi per request)
 │   ├── zed-adapter.log      # Log adapter Zed
@@ -59,9 +60,10 @@ supermemory-local/
 │   ├── sessions-meta.json   # Nama & tag sesi (sidecar, transkrip tidak diubah)
 │   └── sessions-ui.log      # Audit tiap aksi Sessions UI (disetujui/ditolak/kedaluwarsa)
 ├── scripts/
-│   ├── start.sh             # Menjalankan 9router + llm-proxy + zed-adapter + supermemory-server (store sesuai model embedding)
-│   ├── stop.sh              # Menghentikan supermemory-server + llm-proxy + zed-adapter (--all: juga 9router)
-│   └── status.sh            # Cek status kesehatan, port, model, store aktif & daftar store
+│   ├── service.sh           # Controller LaunchAgent: start, stop, restart, status, logs
+│   ├── run.sh               # Menjalankan satu komponen di foreground (dipakai LaunchAgent & untuk debugging)
+│   ├── env.sh               # Konfigurasi bersama: memuat .env, port & path
+│   └── status.sh            # Cek kesehatan, port, model, store aktif & LaunchAgent (exit 1 jika API memori/proxy mati)
 └── src/
     ├── hook-handler.ts      # Handler lifecycle (start, change, stop)
     ├── project-resolver.ts  # Deteksi root Git & hashing tag project
@@ -70,6 +72,7 @@ supermemory-local/
     ├── opencode-plugin.ts   # Plugin native OpenCode (template)
     ├── llm-proxy.ts         # Proxy supermemory → 9router (stream:false di chat, dimensions di embeddings)
     ├── zed-adapter.ts       # Adapter Zed edit prediction: /v1/completions → 9router /chat/completions
+    ├── mcp-server.ts        # Server MCP: JSON-RPC stdio tanpa SDK + tool search, add, profile
     ├── sessions-scan.ts     # Sessions UI: baca ~/.claude (read-only), sesi live, tautan memori
     ├── sessions-actions.ts  # Sessions UI: antrean persetujuan terminal, soft delete/restore/purge, nama & tag
     ├── sessions-other.ts    # Sessions UI: daftar sesi OpenCode & Antigravity (SQLite, dibuka read-only)
@@ -131,25 +134,36 @@ ZED_ADAPTER_REASONING_EFFORT=none
 Butuh [Bun](https://bun.sh) (`curl -fsSL https://bun.sh/install | bash`). Pasang devDependencies sekali (`bun install`), lalu gunakan script bun atau bash langsung:
 
 ```bash
-# Jalankan 9router (jika belum), llm-proxy, zed-adapter & Supermemory Server di background:
+# Pasang & jalankan llm-proxy, zed-adapter & Supermemory Server sebagai LaunchAgent macOS:
 bun run start
-# atau: ./scripts/start.sh (tambahkan --foreground untuk server di foreground)
 ```
 
-Cek status layanan:
+Setelah itu ketiganya menyala otomatis saat login dan di-restart oleh launchd kalau crash (label `com.supermemory-local.server`, `.llm-proxy`, `.zed-adapter`). 9router tidak ikut dikelola karena punya LaunchAgent sendiri: `bun run start` hanya mengecek dan memberi peringatan kalau 9router mati.
+
+Cek status layanan (exit `0` hanya kalau API memori & proxy LLM menjawab, jadi bisa dipakai sebagai health check):
 
 ```bash
 bun run status
-# atau: ./scripts/status.sh
 ```
 
-Untuk menghentikan:
+Perintah lainnya:
+
+```bash
+bun run restart   # stop lalu start (dipakai setelah mengubah .env)
+bun run logs      # tail log ketiga komponen
+bun run stop      # berhenti sampai login berikutnya atau bun run start
+```
+
+Untuk debugging, hentikan layanan lalu jalankan satu komponen di foreground dengan konfigurasi yang sama:
 
 ```bash
 bun run stop
-# atau: ./scripts/stop.sh
-# ./scripts/stop.sh --all  # sekalian menghentikan 9router
+./scripts/run.sh server   # atau: llm-proxy, zed-adapter
 ```
+
+`bun run start` menolak jalan kalau salah satu port dipakai proses lain, dan menyebutkan port serta prosesnya.
+
+Untuk melepas auto-start sepenuhnya: `bun run stop && rm ~/Library/LaunchAgents/com.supermemory-local.*.plist`.
 
 ---
 
@@ -231,7 +245,7 @@ Catatan:
 
 - `PreInvocation` jalan di **setiap giliran**, jadi konteks diambil ulang penuh tiap turn (tidak ada delta seperti `sync` di Claude Code/OpenCode). Tidak ada hook compaction di agy.
 - Hook lain di file yang sama (mis. entri `zentty`) tidak diubah installer; installer hanya mengganti entri `supermemory-local`. File di-backup ke `hooks.json.bak-<waktu>` sebelum ditulis.
-- Hook dibaca saat sesi agy dimulai: buka sesi baru setelah memasang. `bun run start` harus sudah berjalan, kalau tidak hook mengembalikan `{}`.
+- Hook dibaca saat sesi agy dimulai: buka sesi baru setelah memasang. Server memori harus berjalan (`bun run status`), kalau tidak hook mengembalikan `{}`.
 - Payload yang dibaca: `workspacePaths[0]` (folder project), `toolCall.{name,args}` (`TargetFile`, `CommandLine`, `Description`), dan `assistant_response` / `message` (balasan terakhir). Tool `view_*`, `read_*`, `search_web`, `schedule` dan command read-only diabaikan.
 
 ```bash
@@ -277,6 +291,26 @@ Adapter mengirim `reasoning_effort` dari `ZED_ADAPTER_REASONING_EFFORT` (default
 
 ---
 
+## 🔌 Server MCP (search, add, profile)
+
+Selain lewat hook, memori bisa diakses langsung oleh client MCP apa pun, misalnya lewat gateway mcpm. `bin/supermemory-mcp.ts` adalah server MCP stdio, dijalankan oleh client-nya (bukan LaunchAgent):
+
+```bash
+bun --env-file=/path/ke/supermemory-local/.env /path/ke/supermemory-local/bin/supermemory-mcp.ts
+```
+
+| Tool | Argumen | Fungsi |
+|---|---|---|
+| `search` | `project_path`, `query`, `limit` (opsional, default 6) | Mencari memori & cuplikan dokumen project. Query non-Inggris diterjemahkan dulu. |
+| `add` | `project_path`, `content` | Menyimpan catatan ke memori project (`metadata.agent = "MCP"`, `type = "note"`) dan mengembalikan ID dokumen. |
+| `profile` | `project_path` | Fakta jangka panjang & terbaru yang diekstrak server untuk project. |
+
+`project_path` wajib path absolut yang ada, boleh folder apa pun di dalam repo. Container tag-nya dihitung sama seperti hook, jadi agent lewat MCP dan lewat hook memakai memori yang sama.
+
+Kalau server memori mati, tool mengembalikan error dan proses MCP tetap hidup, lalu kembali normal begitu server menyala lagi. Log error ada di `~/.supermemory-hook.log`.
+
+---
+
 ## 🗂️ Sessions UI (daftar sesi Claude Code, OpenCode, Antigravity)
 
 Halaman lokal untuk melihat semua sesi Claude Code di Mac ini (dari `~/.claude/projects`), dikelompokkan per project: judul, branch, waktu, ukuran, file yang diubah, PR, biaya, badge **live** untuk sesi yang sedang berjalan, dan memori supermemory yang ditulis sesi itu (dicocokkan lewat `metadata.session`).
@@ -310,7 +344,7 @@ Jika ingin mengosongkan riwayat memori model embedding yang sedang aktif:
 
 1. Hentikan server:
    ```bash
-   ./scripts/stop.sh
+   bun run stop
    ```
 2. Hapus store aktif beserta marker sesi hook:
    ```bash
@@ -319,16 +353,16 @@ Jika ingin mengosongkan riwayat memori model embedding yang sedang aktif:
    Untuk mengosongkan semua model sekaligus: `rm -rf ./data/stores ./data/current "${TMPDIR}supermemory-sync"`.
 3. Nyalakan kembali server:
    ```bash
-   ./scripts/start.sh
+   bun run start
    ```
 
 ### Mengganti Model
 
-Semua model diatur di `.env`, dan setiap penggantian cukup diikuti `bun run stop && bun run start`. `start.sh` melewati layanan yang sudah berjalan, jadi tanpa `stop` proses lama tetap memakai `.env` versi lama.
+Semua model diatur di `.env`, dan setiap penggantian cukup diikuti `bun run restart`. Tanpa restart, proses yang sedang berjalan tetap memakai `.env` versi lama.
 
 #### Model embedding (`SUPERMEMORY_EMBEDDING_*`)
 
-Server mengunci folder data ke provider, model, dimensi, dan endpoint yang pertama mengisinya (`embedding-plan.json`), lalu menolak start (`Embedding model mismatch`) kalau `.env` berbeda. Karena itu `start.sh` memakai satu store per model di `data/stores/<model>-<dim>d/`. Mengganti model tidak menghapus apa pun: model baru mendapat store kosong, dan kembali ke model lama membuka store lamanya lagi. Memori tidak dibagi antar model, karena embedding dari model berbeda tidak bisa dibandingkan.
+Server mengunci folder data ke provider, model, dimensi, dan endpoint yang pertama mengisinya (`embedding-plan.json`), lalu menolak start (`Embedding model mismatch`) kalau `.env` berbeda. Karena itu `scripts/run.sh` memakai satu store per model di `data/stores/<model>-<dim>d/`. Mengganti model tidak menghapus apa pun: model baru mendapat store kosong, dan kembali ke model lama membuka store lamanya lagi. Memori tidak dibagi antar model, karena embedding dari model berbeda tidak bisa dibandingkan.
 
 1. Cek dimensi model baru lewat 9router. Hasilnya harus ≤ 2000, dan model harus menghormati `dimensions`:
    ```bash
@@ -340,7 +374,7 @@ Server mengunci folder data ke provider, model, dimensi, dan endpoint yang perta
    ```
    Kalau hasilnya bukan 1024, model mengabaikan `dimensions`. Pakai dimensi aslinya (maksimal 2000) di `SUPERMEMORY_EMBEDDING_DIMENSIONS`.
 2. Ubah `SUPERMEMORY_EMBEDDING_MODEL` (dan `SUPERMEMORY_EMBEDDING_DIMENSIONS` bila perlu) di `.env`.
-3. Jalankan `bun run stop && bun run start`, lalu pastikan baris `Data:` dan `Embeddings:` menunjuk ke model baru. `bun run status` menampilkan store aktif dan daftar semua store.
+3. Jalankan `bun run restart`, lalu pastikan baris `Storage:` dan `Embeddings:` di `bun run status` menunjuk ke model baru. Perintah itu juga menampilkan daftar semua store.
 4. Opsional:
    - Hapus store model yang tidak dipakai lagi: `rm -rf ./data/stores/<nama-store>`.
    - Bawa memori lama ke model baru: ekspor dari store lama (`POST /v3/documents/list` lalu `GET /v3/documents/:id`) sebelum langkah 2, lalu masukkan ulang dengan `POST /v3/documents` setelah langkah 3. Ekstraksi ulang memakai kuota 9router sebanding dengan jumlah dokumen.
@@ -364,13 +398,13 @@ Model ini tidak terkunci, dan memori lama tetap aman.
      -H 'Content-Type: application/json' \
      -d '{"model":"<model-baru>","stream":false,"response_format":{"type":"json_object"},"messages":[{"role":"user","content":"balas {\"ok\":true}"}]}'
    ```
-2. Ubah `OPENAI_MODEL` di `.env`, lalu jalankan `bun run stop && bun run start`. Store dan memori tidak berubah.
+2. Ubah `OPENAI_MODEL` di `.env`, lalu jalankan `bun run restart`. Store dan memori tidak berubah.
 3. Cek `data/llm-proxy.log`: panggilan baru harus berstatus `200`, dan dokumen baru harus sampai ke status `done`.
 
 #### Model edit prediction Zed, port, dan key
 
-- **Model Zed:** ganti di pengaturan Zed. Adapter meneruskan `model` dari request apa adanya, jadi tidak perlu restart. `ZED_ADAPTER_REASONING_EFFORT` butuh `bun run stop && bun run start`.
-- **`NINEROUTER_PORT`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`:** cukup `./scripts/stop.sh --all && bun run start`.
+- **Model Zed:** ganti di pengaturan Zed. Adapter meneruskan `model` dari request apa adanya, jadi tidak perlu restart. `ZED_ADAPTER_REASONING_EFFORT` butuh `bun run restart`.
+- **`NINEROUTER_PORT`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`:** cukup `bun run restart`. Kalau port atau key 9router sendiri berubah, restart juga 9router: `launchctl kickstart -k gui/$(id -u)/com.9router.autostart`.
 
 ### Menghapus Dokumen Satu Container Tag
 

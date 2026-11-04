@@ -401,7 +401,7 @@ async function searchPrompt({ payload, project, client, sessionId }: HookContext
 	return hits;
 }
 
-function renderHits(hits: SearchHit[]): string[] {
+export function renderHits(hits: SearchHit[]): string[] {
 	if (!hits.length) return [];
 	const lines = hits.map((h) => {
 		const ts = h.metadata?.timestamp;

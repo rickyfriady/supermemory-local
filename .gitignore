@@ -1,7 +1,4 @@
 node_modules/
-.supermemory.pid
-.llm-proxy.pid
-.zed-adapter.pid
 data/
 *.log
 .env

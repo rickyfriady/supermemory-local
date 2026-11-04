@@ -10,9 +10,11 @@
 		"supermemory-hook": "./bin/supermemory-hook.ts"
 	},
 	"scripts": {
-		"start": "bash scripts/start.sh",
-		"stop": "bash scripts/stop.sh",
-		"status": "bash scripts/status.sh",
+		"start": "bash scripts/service.sh start",
+		"stop": "bash scripts/service.sh stop",
+		"restart": "bash scripts/service.sh restart",
+		"status": "bash scripts/service.sh status",
+		"logs": "bash scripts/service.sh logs",
 		"sessions": "bun --env-file=.env bin/sessions-ui.ts",
 		"install-hooks": "bun src/installer.ts install",
 		"uninstall-hooks": "bun src/installer.ts uninstall",
