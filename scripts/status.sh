@@ -1,25 +1,13 @@
 #!/usr/bin/env bash
 # ========================================================
 # Check Status of Supermemory Local & 9router
+# Exit code: 0 only when the memory API and the LLM proxy both answer (usable as a health check)
 # ========================================================
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 
-# Load .env
-if [ -f "$PROJECT_ROOT/.env" ]; then
-  set -a
-  source "$PROJECT_ROOT/.env"
-  set +a
-fi
-
-NINEROUTER_PORT="${NINEROUTER_PORT:-20128}"
-NINEROUTER_URL="http://127.0.0.1:${NINEROUTER_PORT}/v1"
-SM_PORT="${PORT:-6767}"
-PID_FILE="$PROJECT_ROOT/.supermemory.pid"
-DATA_DIR="${SUPERMEMORY_DATA_DIR:-./data}"
-[[ "$DATA_DIR" = /* ]] || DATA_DIR="$PROJECT_ROOT/${DATA_DIR#./}"
+HEALTHY=1
 
 echo "========================================================"
 echo " Supermemory Local & 9router Status"
@@ -36,13 +24,12 @@ else
   echo "   ○ Gateway: NOT running (Expected port $NINEROUTER_PORT)"
 fi
 
-LLM_PROXY_PORT="${LLM_PROXY_PORT:-20129}"
 if curl -s --connect-timeout 2 "http://127.0.0.1:$LLM_PROXY_PORT/models" >/dev/null 2>&1; then
   echo "   ● LLM proxy: Running on http://127.0.0.1:$LLM_PROXY_PORT (stream:false + embedding dimensions)"
 else
   echo "   ○ LLM proxy: NOT running (supermemory memory generation will fail)"
+  HEALTHY=0
 fi
-ZED_ADAPTER_PORT="${ZED_ADAPTER_PORT:-20130}"
 if curl -s --connect-timeout 2 "http://127.0.0.1:$ZED_ADAPTER_PORT/v1/completions" >/dev/null 2>&1; then
   echo "   ● Zed adapter: Running on http://127.0.0.1:$ZED_ADAPTER_PORT/v1/completions"
 else
@@ -52,24 +39,6 @@ echo ""
 
 # 2. Supermemory Status
 echo "2. Supermemory Status:"
-IS_RUNNING=0
-if [ -f "$PID_FILE" ]; then
-  PID="$(cat "$PID_FILE" 2>/dev/null || true)"
-  if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
-    IS_RUNNING=1
-    echo "   ● Process: Running (PID: $PID)"
-  fi
-fi
-
-if [ "$IS_RUNNING" -eq 0 ]; then
-  if pgrep -f "supermemory-server" >/dev/null 2>&1; then
-    IS_RUNNING=1
-    echo "   ● Process: Running (detected via process table)"
-  else
-    echo "   ○ Process: NOT running"
-  fi
-fi
-
 if curl -s --connect-timeout 2 "http://localhost:$SM_PORT/v4/search" \
   -H "Content-Type: application/json" \
   -d '{"q":"ping","limit":1}' >/dev/null 2>&1; then
@@ -79,6 +48,20 @@ if curl -s --connect-timeout 2 "http://localhost:$SM_PORT/v4/search" \
   echo "   ● Embeddings: ${SUPERMEMORY_EMBEDDING_MODEL:-Xenova/bge-base-en-v1.5} (${SUPERMEMORY_EMBEDDING_PROVIDER:-local}), translate: ${TRANSLATE_MODEL:-off}"
 else
   echo "   ○ HTTP API: Not responding on port $SM_PORT"
+  HEALTHY=0
 fi
+echo ""
+
+# 3. LaunchAgents
+echo "3. LaunchAgents:"
+for c in server llm-proxy zed-adapter; do
+  LABEL="com.supermemory-local.$c"
+  if INFO="$(launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null)"; then
+    echo "   ● $LABEL: loaded ($(echo "$INFO" | awk '/^[[:space:]]+pid = / {print "PID " $3; exit}'))"
+  else
+    echo "   ○ $LABEL: not loaded (start with: bun run start)"
+  fi
+done
 
 echo "========================================================"
+[ "$HEALTHY" -eq 1 ]
