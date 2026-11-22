@@ -1,0 +1,12 @@
+{
+	"keys": ["sessionID", "messageID", "prompt", "metadata", "delivery"],
+	"e": {
+		"sessionID": "ses_e1ce7565dffeNyzuUMftlLYN5k",
+		"messageID": "msg_1e318a9aa0012r5wC8GI7EYn89",
+		"prompt": {
+			"text": "\"Reply with exactly OK.\"",
+			"files": []
+		},
+		"delivery": "steer"
+	}
+}

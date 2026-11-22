@@ -16,6 +16,12 @@ async function main() {
 	}
 
 	const project = resolveProject();
+	if (!project) {
+		console.error(
+			'This directory has no project memory (home, a folder of repositories, or SUPERMEMORY_IGNORE). Run it inside a repository.',
+		);
+		process.exit(1);
+	}
 	console.log(`Current Project: ${project.projectName}`);
 	console.log(`Git/Root Path:   ${project.rootDir}`);
 	// Isolated tag so fake test notes never leak into a real project's memory

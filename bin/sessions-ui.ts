@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 // Local page listing Claude Code, OpenCode and Antigravity sessions (rename/tags for all, delete for Claude Code and OpenCode): bun --env-file=<repo>/.env bin/sessions-ui.ts (bun run sessions)
 // Runs in the foreground: every change requested in the browser is approved with y/N in this terminal.
-import path from 'node:path';
+import { currentConfig } from '../src/config.ts';
 import { terminalPrompt } from '../src/sessions-actions.ts';
 import { claudeRoots } from '../src/sessions-scan.ts';
 import { startServer } from '../src/sessions-server.ts';
@@ -14,12 +14,13 @@ if (!process.stdin.isTTY) {
 	process.exit(1);
 }
 
-const port = Number(process.env.SESSIONS_UI_PORT) || 20131;
+const config = currentConfig();
+const port = config.sessionsUiPort;
 try {
 	startServer({
 		port,
 		roots: claudeRoots(),
-		dataDir: path.resolve(import.meta.dir, '../data'),
+		dataDir: config.dataDir,
 		prompt: terminalPrompt(),
 		client: new SupermemoryClient(),
 	});

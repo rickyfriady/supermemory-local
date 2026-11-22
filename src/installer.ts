@@ -82,15 +82,22 @@ function uninstallClaudeCode() {
 // ----------------------------------------------------
 // Antigravity (~/.gemini/config/hooks.json, one named top-level hook)
 // ----------------------------------------------------
+/** The `supermemory-local` entry of agy's hooks.json: full recall once per conversation, then a per-turn update */
+export function antigravityHooks(cmd: (agent: string, action: string) => Json = command): Json {
+	return {
+		enabled: true,
+		SessionStart: [cmd('antigravity', 'start')],
+		// Fires before every model call; the adapter only acts on the first call of a user turn
+		PreInvocation: [cmd('antigravity', 'sync')],
+		PostToolUse: [{ matcher: 'write_to_file|replace_file_content|run_command', hooks: [cmd('antigravity', 'change')] }],
+		Stop: [cmd('antigravity', 'stop')],
+	};
+}
+
 function installAntigravity() {
 	console.log(`\n→ Configuring Antigravity hooks (${ANTIGRAVITY_HOOKS})...`);
 	const hooksData = readConfig(ANTIGRAVITY_HOOKS);
-	hooksData['supermemory-local'] = {
-		enabled: true,
-		PreInvocation: [command('antigravity', 'start')],
-		PostToolUse: [{ matcher: 'write_to_file|replace_file_content|run_command', hooks: [command('antigravity', 'change')] }],
-		Stop: [command('antigravity', 'stop')],
-	};
+	hooksData['supermemory-local'] = antigravityHooks();
 	writeConfig(ANTIGRAVITY_HOOKS, hooksData);
 	console.log('✓ Antigravity hooks installed successfully.');
 }
@@ -122,6 +129,11 @@ function removeOpenCodeArtifacts() {
 		writeConfig(OPENCODE_CONFIG, config);
 		console.log(`   [config] Removed plugin entry from ${OPENCODE_CONFIG}`);
 	}
+}
+
+/** The plugin template with its `const HOOK_CMD = [...];` statement pointed at this checkout's hook */
+export function pluginSource(template: string, hookCmd: string[]): string {
+	return template.replace(/const HOOK_CMD = [^;]*;/, `const HOOK_CMD = ${JSON.stringify(hookCmd)};`);
 }
 
 function installOpenCode() {
@@ -157,25 +169,27 @@ const TARGETS = {
 };
 type Target = keyof typeof TARGETS;
 
-const action = process.argv[2] || 'install';
-const target = process.argv[3] || 'all';
+if (import.meta.main) {
+	const action = process.argv[2] || 'install';
+	const target = process.argv[3] || 'all';
 
-if (action !== 'install' && action !== 'uninstall') {
-	console.error(`Unknown action: ${action}. Use 'install' or 'uninstall'.`);
-	process.exit(1);
+	if (action !== 'install' && action !== 'uninstall') {
+		console.error(`Unknown action: ${action}. Use 'install' or 'uninstall'.`);
+		process.exit(1);
+	}
+	if (target !== 'all' && !(target in TARGETS)) {
+		console.error(`Unknown target: ${target}. Use all, ${Object.keys(TARGETS).join(', ')}.`);
+		process.exit(1);
+	}
+
+	console.log('========================================================');
+	console.log(` Supermemory Hooks Manager: ${action.toUpperCase()}`);
+	console.log(` Target CLI(s): ${target}`);
+	console.log(` Hook command:  ${hookCmd('<agent>', '<action>')}`);
+	console.log('========================================================');
+
+	const selected = (target === 'all' ? Object.keys(TARGETS) : [target]) as Target[];
+	for (const t of selected) TARGETS[t][action]();
+
+	console.log(`\n✨ All requested hooks ${action === 'install' ? 'installed' : 'uninstalled'}.`);
 }
-if (target !== 'all' && !(target in TARGETS)) {
-	console.error(`Unknown target: ${target}. Use all, ${Object.keys(TARGETS).join(', ')}.`);
-	process.exit(1);
-}
-
-console.log('========================================================');
-console.log(` Supermemory Hooks Manager: ${action.toUpperCase()}`);
-console.log(` Target CLI(s): ${target}`);
-console.log(` Hook command:  ${hookCmd('<agent>', '<action>')}`);
-console.log('========================================================');
-
-const selected = (target === 'all' ? Object.keys(TARGETS) : [target]) as Target[];
-for (const t of selected) TARGETS[t][action]();
-
-console.log(`\n✨ All requested hooks ${action === 'install' ? 'installed' : 'uninstalled'}.`);

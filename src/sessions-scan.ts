@@ -285,7 +285,7 @@ export async function linkMemories(groups: ProjectGroup[], client: MemoryClient)
 	if (!(await client.isHealthy())) return links;
 	links.available = true;
 	const tags = new Map<string, string>(); // containerTag -> project
-	for (const g of groups) tags.set(resolveProject(g.project).containerTag, g.project);
+	for (const g of groups) for (const tag of resolveProject(g.project)?.readTags ?? []) tags.set(tag, g.project);
 	await Promise.all(
 		[...tags.keys()].map(async (tag) => {
 			const docs: DocumentSummary[] = await client.listDocuments({ containerTags: [tag], limit: MEMORY_LIMIT });

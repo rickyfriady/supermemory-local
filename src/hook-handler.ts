@@ -3,8 +3,13 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { adapterFor, normalizeAction, type HookEvent } from './agents/index.ts';
+import { currentConfig } from './config.ts';
 import { SupermemoryClient, type DocumentSummary, type SearchHit } from './supermemory-client.ts';
-import { resolveProject, type Project } from './project-resolver.ts';
+import { containerReason, resolveProject, type Project } from './project-resolver.ts';
+
+export { trimCompactSummary } from './agents/claude-code.ts';
+export { lastTranscriptText } from './agents/shared.ts';
 
 const LOG_FILE = path.join(process.env.HOME || '/tmp', '.supermemory-hook.log');
 
@@ -14,21 +19,6 @@ export function log(msg: string) {
 	} catch {}
 }
 
-// ponytail: prefix heuristic for read-only shell commands; they flood memory with noise (ls, git status...).
-const READONLY_CMD =
-	/^\s*(cd\s+\S+\s*&&\s*)?(rtk\s+)?(ls|ll|pwd|cat|head|tail|less|wc|grep|rg|find|fd|which|echo|tree|git (status|log|diff|show|branch))\b/;
-const OPENCODE_READONLY_TOOLS = new Set([
-	'read',
-	'glob',
-	'grep',
-	'list',
-	'webfetch',
-	'websearch',
-	'codesearch',
-	'todoread',
-	'todowrite',
-	'skill',
-]);
 const MAX_SUMMARY = 4000;
 // Compaction summaries run 12-37k chars (Claude Code); the useful parts (pending work, current state) sit at the end
 const MAX_COMPACT = 40_000;
@@ -47,39 +37,11 @@ const PROFILE_FACTS = 15;
 const MAX_CHUNKS = 2;
 const MAX_CHUNK_CHARS = 600;
 
-/** Union of the stdin payload shapes sent by the three agents (all fields optional) */
-interface Payload {
-	raw?: string;
-	// Working directory: Claude/OpenCode `cwd`, Antigravity `workspacePaths`
-	cwd?: string;
-	workspacePaths?: string[];
-	directory?: string;
-	// Claude Code `session_id`, OpenCode `sessionID` (plugin)
-	session_id?: string;
-	sessionID?: string;
-	// Claude Code UserPromptSubmit
-	prompt?: string;
-	// Claude Code PostToolUse / Stop
-	tool_name?: string;
-	tool_input?: { file_path?: string; notebook_path?: string; command?: string };
-	last_assistant_message?: string;
-	transcript_path?: string;
-	// Antigravity PostToolUse / Stop
-	toolCall?: { name?: string; args?: Record<string, string | undefined> };
-	assistant_response?: string;
-	message?: unknown;
-	// OpenCode (built by opencode-plugin.ts)
-	tool?: string;
-	args?: { command?: string } & Record<string, unknown>;
-	summary?: string;
-}
-
 interface HookContext {
-	agent: string;
 	agentLabel: string;
 	sessionId?: string;
 	project: Project;
-	payload: Payload;
+	event: HookEvent;
 	client: SupermemoryClient;
 }
 
@@ -122,13 +84,12 @@ export function isEnglish(text: string): boolean {
  * or the call fails or times out: translation must never block or break a hook.
  */
 export async function toEnglish(text: string, timeoutMs = 8000): Promise<string> {
-	const model = process.env.TRANSLATE_MODEL?.trim();
-	const baseUrl = process.env.OPENAI_BASE_URL?.replace(/\/$/, '');
-	if (!model || !baseUrl || !text.trim() || isEnglish(text)) return text;
+	const { translateModel: model, llmUpstream: baseUrl, llmApiKey } = currentConfig();
+	if (!model || !text.trim() || isEnglish(text)) return text;
 	try {
 		const res = await fetch(`${baseUrl}/chat/completions`, {
 			method: 'POST',
-			headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.OPENAI_API_KEY ?? ''}` },
+			headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${llmApiKey}` },
 			body: JSON.stringify({
 				model,
 				stream: false,
@@ -168,43 +129,6 @@ async function save(
 }
 
 /**
- * Text of the last Claude Code JSONL transcript entry matching `pick`: the last assistant reply
- * (fallback when the Stop payload lacks it) or the last compaction summary
- */
-export function lastTranscriptText(transcriptPath: string, pick: (entry: any) => boolean): string {
-	try {
-		const lines = fs.readFileSync(transcriptPath, 'utf-8').trim().split('\n');
-		for (let i = lines.length - 1; i >= 0; i--) {
-			const entry = JSON.parse(lines[i]!);
-			if (!pick(entry)) continue;
-			const content: string | { type: string; text?: string }[] | undefined = entry.message?.content;
-			const text =
-				typeof content === 'string'
-					? content
-					: (content || [])
-							.filter((c) => c.type === 'text')
-							.map((c) => c.text)
-							.join('\n');
-			if (text.trim()) return text;
-		}
-	} catch {}
-	return '';
-}
-
-function getAgentLabel(agent: string): string {
-	switch (agent.toLowerCase()) {
-		case 'claude-code':
-			return 'Claude Code';
-		case 'antigravity':
-			return 'Antigravity';
-		case 'opencode':
-			return 'OpenCode';
-		default:
-			return agent || 'Unknown Agent';
-	}
-}
-
-/**
  * Read all of stdin; gives up after 2s so a hook never hangs on an open pipe
  */
 async function readStdin(): Promise<string> {
@@ -214,52 +138,84 @@ async function readStdin(): Promise<string> {
 	return (await Promise.race([Bun.stdin.text(), timeout])).trim();
 }
 
+/** Nearest directory at or above `p` that exists: a file the agent is about to create has no directory to resolve yet */
+function nearestExistingDir(p: string): string {
+	let dir = p;
+	for (let i = 0; i < 64 && !fs.existsSync(dir); i++) dir = path.dirname(dir);
+	return fs.existsSync(dir) && fs.statSync(dir).isFile() ? path.dirname(dir) : dir;
+}
+
 /**
- * Main hook entrypoint. Only this function writes stdout: whatever `start` returns is the
- * injected context, and Antigravity always gets a JSON object.
+ * The project an event belongs to. Where the agent works can have none (a folder of repositories, $HOME, an ignored folder):
+ * a change note then goes to the repository that owns the file it touched, anything else is dropped.
+ */
+function projectFor(event: HookEvent, action: string): Project | null {
+	const own = resolveProject(event.cwd);
+	if (own || action !== 'change' || !event.change?.file) return own;
+	return resolveProject(nearestExistingDir(path.resolve(event.cwd, event.change.file)));
+}
+
+/** One line for an agent started where there is no project, so it knows where memory is and how to reach it */
+function containerHint(cwd: string): string {
+	const why = containerReason(cwd);
+	if (!why || why.kind === 'ignored') return '';
+	return [
+		'<supermemory-context>',
+		`${CONTEXT_HEADER} (no project) (${cwd})`,
+		`Memory is kept per repository and this folder is not one: ${why.message}.`,
+		'Use the supermemory search/add/profile tools with project_path set to a repository to read or write its memory.',
+		'</supermemory-context>',
+	].join('\n');
+}
+
+/** What an agent should get on stdout when its hook has nothing to say (agy always needs a JSON object) */
+export const emptyOutput = (agent: string): string | null => adapterFor(agent).render('');
+
+/**
+ * Main hook entrypoint. Only this function writes stdout: whatever `start` returns is the injected context,
+ * rendered in the format the agent expects (agy always gets a JSON object).
  */
 export async function runHook(agent: string, action: string) {
 	log(`Invoked: agent=${agent}, action=${action}`);
+	const adapter = adapterFor(agent);
+	const name = normalizeAction(action);
 
 	const stdinRaw = await readStdin();
-	let payload: Payload = {};
+	let raw: Record<string, any> = {};
 	if (stdinRaw) {
 		try {
-			payload = JSON.parse(stdinRaw);
+			raw = JSON.parse(stdinRaw);
 		} catch {
-			payload = { raw: stdinRaw };
+			raw = { raw: stdinRaw };
 		}
 	}
 
-	const project = resolveProject(payload.cwd || payload.workspacePaths?.[0] || payload.directory || process.cwd());
-	const ctx: HookContext = {
-		agent,
-		agentLabel: getAgentLabel(agent),
-		sessionId: payload.session_id || payload.sessionID,
-		project,
-		payload,
-		client: new SupermemoryClient(),
-	};
-	log(`Project: ${project.projectName} (${project.rootDir}), Agent: ${ctx.agentLabel}`);
-
+	const event = name ? adapter.parse(raw, name) : null;
 	let context = '';
-	if (action === 'start' || action === 'check' || action === 'context') {
-		context = await handleStart(ctx);
-	} else if (action === 'sync' || action === 'prompt') {
-		context = await handleSync(ctx);
-	} else if (action === 'change' || action === 'observation') {
-		await handleChange(ctx);
-	} else if (action === 'stop' || action === 'session-end' || action === 'summarize') {
-		await handleStop(ctx);
-	} else if (action === 'compact' || action === 'compacted') {
-		await handleCompact(ctx);
+	if (event && name) {
+		const project = projectFor(event, name);
+		if (!project) {
+			log(`No project for ${event.cwd} (${name}), Agent: ${adapter.label}`);
+			if (name === 'start') context = containerHint(event.cwd);
+		} else {
+			const ctx: HookContext = {
+				agentLabel: adapter.label,
+				sessionId: event.sessionId,
+				project,
+				event,
+				client: new SupermemoryClient(),
+			};
+			log(`Project: ${project.projectName} (${project.rootDir}), Agent: ${ctx.agentLabel}`);
+			if (name === 'start') context = await handleStart(ctx);
+			else if (name === 'sync') context = await handleSync(ctx);
+			else if (name === 'change') await handleChange(ctx);
+			else if (name === 'stop') await handleStop(ctx);
+			else await handleCompact(ctx);
+		}
 	}
 
-	if (agent === 'antigravity') {
-		console.log(JSON.stringify(context ? { injectSteps: [{ ephemeralMessage: context }] } : {}));
-	} else if (context) {
-		console.log(context);
-	}
+	const out = adapter.render(context);
+	if (out !== null) console.log(out);
 }
 
 /**
@@ -330,8 +286,8 @@ async function handleStart({ project, client, sessionId }: HookContext): Promise
 	// Newest-first listing (not vector search): memories written by any agent are
 	// visible immediately, before the server finishes chunking/embedding them.
 	const [recent, profile] = await Promise.all([
-		client.listDocuments({ containerTags: [project.containerTag], limit: 50 }),
-		client.profile(project.containerTag),
+		client.listDocuments({ containerTags: project.readTags, limit: 50 }),
+		client.profile(project.readTags),
 	]);
 	writeMarker(sessionId, recent);
 	const facts = [...(profile?.static ?? []), ...(profile?.dynamic ?? []).slice(0, PROFILE_FACTS)].map(stripContext);
@@ -382,8 +338,8 @@ function seenFile(sessionId: string) {
 /**
  * Hybrid search (extracted memories + raw document chunks) for the user's prompt, minus what this session already got
  */
-async function searchPrompt({ payload, project, client, sessionId }: HookContext): Promise<SearchHit[]> {
-	const q = payload.prompt?.trim() ?? '';
+async function searchPrompt({ event, project, client, sessionId }: HookContext): Promise<SearchHit[]> {
+	const q = event.prompt?.trim() ?? '';
 	// ponytail: no client-side score threshold; with English queries (translated below) or a multilingual embedding model
 	// the server already returns nothing for unrelated chit-chat. One/two-word replies ("ya", "lanjut") are skipped to save the call
 	if (!sessionId || q.split(/\s+/).length < 3) return [];
@@ -392,7 +348,7 @@ async function searchPrompt({ payload, project, client, sessionId }: HookContext
 		seen = new Set(fs.readFileSync(seenFile(sessionId), 'utf-8').split('\n'));
 	} catch {}
 	const query = await toEnglish(q.slice(0, 1000));
-	const hits = pickHits(await client.search({ q: query, containerTag: project.containerTag }), sessionId, seen);
+	const hits = pickHits(await client.search({ q: query, containerTags: project.readTags }), sessionId, seen);
 	try {
 		if (hits.length) fs.appendFileSync(seenFile(sessionId), hits.map((h) => h.id).join('\n') + '\n');
 	} catch (err) {
@@ -423,7 +379,7 @@ async function handleSync(ctx: HookContext): Promise<string> {
 	if (marker === undefined) return sessionId ? handleStart(ctx) : '';
 
 	const [recent, hits] = await Promise.all([
-		client.listDocuments({ containerTags: [project.containerTag], limit: 50 }),
+		client.listDocuments({ containerTags: project.readTags, limit: 50 }),
 		searchPrompt(ctx),
 	]);
 	if (recent.length) writeMarker(sessionId, recent); // server down or empty: keep the marker
@@ -443,106 +399,42 @@ async function handleSync(ctx: HookContext): Promise<string> {
 }
 
 /**
- * Builds the change note for a tool execution, or "" when it's read-only noise
- */
-function describeChange({ agent, agentLabel, project, payload }: HookContext): string {
-	if (agent === 'antigravity') {
-		const toolName = payload.toolCall?.name || 'unknown_tool';
-		const toolArgs = payload.toolCall?.args || {};
-		if (toolName.startsWith('view_') || toolName.startsWith('read_') || toolName === 'search_web' || toolName === 'schedule')
-			return '';
-
-		let detail: string;
-		if (toolArgs.TargetFile) {
-			detail = `File: ${toolArgs.TargetFile}\nDescription: ${toolArgs.Description || toolArgs.Instruction || ''}`;
-		} else if (toolArgs.CommandLine) {
-			if (READONLY_CMD.test(toolArgs.CommandLine)) return '';
-			detail = `Command: ${toolArgs.CommandLine}`;
-		} else {
-			detail = JSON.stringify(toolArgs).slice(0, 300);
-		}
-		return `[Agent: ${agentLabel}] Tool "${toolName}" executed in ${project.projectName}:\n${detail}`;
-	}
-
-	if (agent === 'opencode') {
-		const tool = payload.tool || 'action';
-		if (OPENCODE_READONLY_TOOLS.has(tool) || (tool === 'bash' && READONLY_CMD.test(payload.args?.command || ''))) return '';
-		const args = payload.args ? JSON.stringify(payload.args).slice(0, 300) : '';
-		return `[Agent: ${agentLabel}] Action "${tool}" in ${project.projectName}:\n${args}`;
-	}
-
-	// Claude Code PostToolUse payload: { tool_name, tool_input: { file_path | notebook_path | command } }
-	const tool = payload.tool_name || 'unknown_tool';
-	const input = payload.tool_input || {};
-	if (tool === 'Bash' && READONLY_CMD.test(input.command || '')) return '';
-	const file = input.file_path || input.notebook_path;
-	const detail = file
-		? `File: ${file}`
-		: input.command
-			? `Command: ${input.command.slice(0, 300)}`
-			: payload.raw || JSON.stringify(input).slice(0, 300);
-	return `[Agent: ${agentLabel}] Tool "${tool}" executed in ${project.projectName}:\n${detail}`;
-}
-
-/**
- * 'change' / 'observation': records tool executions / file modifications tagged with the agent
+ * 'change': records tool executions / file modifications tagged with the agent (read-only noise was already dropped by the adapter)
  */
 async function handleChange(ctx: HookContext) {
-	const change = describeChange(ctx);
-	if (change) await save(ctx, 'change_observation', change);
+	const { change } = ctx.event;
+	if (!change) return;
+	await save(
+		ctx,
+		'change_observation',
+		`[Agent: ${ctx.agentLabel}] Tool "${change.tool}" executed in ${ctx.project.projectName}:\n${change.detail}`,
+	);
 }
 
 /**
- * 'stop' / 'session-end': stores the session summary tagged with the agent and project
+ * 'stop': stores the final reply as a session summary tagged with the agent and project
  */
 async function handleStop(ctx: HookContext) {
-	const { payload, agentLabel, project } = ctx;
-	// Claude Code / Antigravity Stop payloads carry the final reply in one of these fields
-	const summary = stripContext(
-		payload.summary ||
-			payload.last_assistant_message ||
-			payload.assistant_response ||
-			(typeof payload.message === 'string' ? payload.message : '') ||
-			(payload.transcript_path ? lastTranscriptText(payload.transcript_path, (e) => e.type === 'assistant') : '') ||
-			payload.raw ||
-			'',
-	);
-
+	const summary = stripContext(ctx.event.summary ?? '');
 	if (summary.length > 10) {
 		// Compaction summaries (handleCompact, up to 40k chars) stay untranslated: too slow for the hook timeout, and the
 		// server's memory extraction writes English facts from them anyway
 		const english = await toEnglish(summary, 12_000);
-		await save(ctx, 'session_summary', `[Agent: ${agentLabel}] Session Summary for ${project.projectName}:\n${english}`);
+		await save(ctx, 'session_summary', `[Agent: ${ctx.agentLabel}] Session Summary for ${ctx.project.projectName}:\n${english}`);
 	}
 }
 
 /**
- * Claude Code's compaction summary without the "session is being continued" preamble and the
- * trailing "read the full transcript / resume directly" instructions meant for the model itself
- */
-export function trimCompactSummary(text: string): string {
-	// ponytail: matches Claude Code's current wrapper wording; if it changes, the full text is stored as-is
-	return text
-		.replace(/^This session is being continued[\s\S]*?\nSummary:\n/, '')
-		.replace(/\n+If you need specific details from before compaction[\s\S]*$/, '')
-		.trim();
-}
-
-/**
- * 'compact' (Claude Code PostCompact, OpenCode session.compacted): stores the summary the agent just
- * wrote while compacting, so the history it dropped from its own context stays in shared memory
+ * 'compact' (Claude Code PostCompact, OpenCode compaction): stores the summary the agent just wrote while
+ * compacting, so the history it dropped from its own context stays in shared memory
  */
 async function handleCompact(ctx: HookContext) {
-	const { payload, agentLabel, project } = ctx;
-	const summary = stripContext(
-		payload.summary ||
-			(payload.transcript_path ? trimCompactSummary(lastTranscriptText(payload.transcript_path, (e) => e.isCompactSummary)) : ''),
-	);
+	const summary = stripContext(ctx.event.summary ?? '');
 	if (summary.length > 10) {
 		await save(
 			ctx,
 			'session_summary',
-			`[Agent: ${agentLabel}] Compaction Summary for ${project.projectName}:\n${summary}`,
+			`[Agent: ${ctx.agentLabel}] Compaction Summary for ${ctx.project.projectName}:\n${summary}`,
 			MAX_COMPACT,
 		);
 	}

@@ -3,11 +3,13 @@
 // which supermemory can't parse ("Invalid JSON response"). This forces "stream": false when unset.
 // supermemory also sends /embeddings `dimensions` only for text-embedding-3-*, so Jina v4 (2048) or Gemini (3072) answer
 // above pgvector's 2000 limit; this fills SUPERMEMORY_EMBEDDING_DIMENSIONS instead.
-// Usage: OPENAI_BASE_URL=http://127.0.0.1:20128/v1 LLM_PROXY_PORT=20129 SUPERMEMORY_EMBEDDING_DIMENSIONS=1024 bun src/llm-proxy.ts
+// Settings come from src/config.ts (.env): OPENAI_BASE_URL (upstream), LLM_PROXY_PORT, SUPERMEMORY_EMBEDDING_DIMENSIONS.
+import { currentConfig } from './config.ts';
 
-const TARGET = process.env.OPENAI_BASE_URL!.replace(/\/$/, '');
-const PORT = Number(process.env.LLM_PROXY_PORT);
-const DIMENSIONS = Number(process.env.SUPERMEMORY_EMBEDDING_DIMENSIONS) || undefined;
+const cfg = currentConfig();
+const TARGET = cfg.llmUpstream;
+const PORT = cfg.llmProxyPort;
+const DIMENSIONS = cfg.embedding.dimensions || undefined;
 
 /**
  * Fills what supermemory leaves unset: `stream: false` on chat calls, `dimensions` on /embeddings

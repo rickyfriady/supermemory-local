@@ -3,7 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { log, renderHits, stripContext, toEnglish } from './hook-handler.ts';
-import { resolveProject } from './project-resolver.ts';
+import { containerReason, type Project, resolveProject } from './project-resolver.ts';
 import { type Result, type SearchHit, SupermemoryClient } from './supermemory-client.ts';
 
 const DEFAULT_LIMIT = 6;
@@ -49,12 +49,14 @@ export const TOOLS = [
 
 type Args = Record<string, unknown>;
 
-function project(args: Args) {
+function project(args: Args): Project {
 	const p = args.project_path;
 	if (typeof p !== 'string' || !path.isAbsolute(p) || !fs.existsSync(p)) {
 		throw new Error('project_path must be an absolute path that exists');
 	}
-	return resolveProject(p);
+	const found = resolveProject(p);
+	if (!found) throw new Error(`project_path has no project memory: ${containerReason(p)?.message ?? 'not a project'}`);
+	return found;
 }
 
 function requiredText(args: Args, name: string): string {
@@ -74,18 +76,19 @@ const bullets = (facts: string[] = []) => (facts.length ? facts.map((f) => `- ${
 
 const HANDLERS: Record<string, (args: Args, client: SupermemoryClient) => Promise<string>> = {
 	async search(args, client) {
-		const { containerTag } = project(args);
+		const { readTags } = project(args);
 		const q = await toEnglish(requiredText(args, 'query').slice(0, 1000));
 		const wanted = Number.isInteger(args.limit) ? (args.limit as number) : DEFAULT_LIMIT;
 		const limit = Math.min(Math.max(wanted, 1), MAX_LIMIT);
 		// client.request, not client.search: search() turns failures into an empty result, which reads as "no memories"
-		const res = await client.request<{ results?: SearchHit[] }>('POST', '/v4/search', {
-			q,
-			containerTag,
-			searchMode: 'hybrid',
-			limit,
-		});
-		const lines = renderHits(unwrap(res, client).results ?? []);
+		// One call per tag (clones of one remote have several); /v4/search is single-space
+		const perTag = await Promise.all(
+			readTags.map((containerTag) =>
+				client.request<{ results?: SearchHit[] }>('POST', '/v4/search', { q, containerTag, searchMode: 'hybrid', limit }),
+			),
+		);
+		const hits = perTag.flatMap((res) => unwrap(res, client).results ?? []);
+		const lines = renderHits(readTags.length > 1 ? hits.sort((a, b) => b.similarity - a.similarity).slice(0, limit) : hits);
 		return lines.length ? lines.join('\n').trim() : 'No memories found for this project.';
 	},
 
@@ -103,11 +106,18 @@ const HANDLERS: Record<string, (args: Args, client: SupermemoryClient) => Promis
 	},
 
 	async profile(args, client) {
-		const { containerTag } = project(args);
-		const res = await client.request<{ profile?: { static?: string[]; dynamic?: string[] } }>('POST', '/v4/profile', {
-			containerTag,
-		});
-		const { static: longLived, dynamic: recent } = unwrap(res, client).profile ?? {};
+		const { readTags } = project(args);
+		const perTag = await Promise.all(
+			readTags.map((containerTag) =>
+				client.request<{ profile?: { static?: string[]; dynamic?: string[] } }>('POST', '/v4/profile', { containerTag }),
+			),
+		);
+		const profiles = perTag.map((res) => unwrap(res, client).profile ?? {});
+		const merge = (pick: (p: { static?: string[]; dynamic?: string[] }) => string[] | undefined) => [
+			...new Set(profiles.flatMap((p) => pick(p) ?? [])),
+		];
+		const longLived = merge((p) => p.static);
+		const recent = merge((p) => p.dynamic);
 		return `## Long-lived facts\n${bullets(longLived)}\n\n## Recent facts\n${bullets(recent)}`;
 	},
 };

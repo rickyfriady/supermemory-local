@@ -1,0 +1,15 @@
+{
+	"_note": "ctx.tool.hook('execute.after') event. Shell tool is named 'shell' in v2 (was 'bash').",
+	"tool": "shell",
+	"sessionID": "ses_e1cea33bfffepfrdy1JKuE7EJJ",
+	"agent": "build",
+	"messageID": "msg_1e315ce15001jkd4BOdmvLGFjU",
+	"id": "toolu_call-44995f73-b6ef-438e-b828-1a11dc3b58d4",
+	"input": { "command": "echo spike" },
+	"status": "completed",
+	"result": {
+		"output": { "exit": 0, "truncated": false, "output": "spike\n", "status": "completed" },
+		"content": [{ "type": "text", "text": "spike\n" }],
+		"metadata": { "status": "completed", "truncated": false, "exit": 0 }
+	}
+}

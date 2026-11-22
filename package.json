@@ -10,12 +10,13 @@
 		"supermemory-hook": "./bin/supermemory-hook.ts"
 	},
 	"scripts": {
-		"start": "bash scripts/service.sh start",
-		"stop": "bash scripts/service.sh stop",
-		"restart": "bash scripts/service.sh restart",
-		"status": "bash scripts/service.sh status",
-		"logs": "bash scripts/service.sh logs",
+		"start": "bun --env-file=.env bin/stack.ts start",
+		"stop": "bun --env-file=.env bin/stack.ts stop",
+		"restart": "bun --env-file=.env bin/stack.ts restart",
+		"status": "bun --env-file=.env bin/stack.ts status",
+		"logs": "bun --env-file=.env bin/stack.ts logs",
 		"sessions": "bun --env-file=.env bin/sessions-ui.ts",
+		"link-projects": "bun --env-file=.env bin/link-projects.ts",
 		"install-hooks": "bun src/installer.ts install",
 		"uninstall-hooks": "bun src/installer.ts uninstall",
 		"test-memory": "bun src/test-memory.ts",
@@ -35,8 +36,7 @@
 	],
 	"devDependencies": {
 		"@irfnd/prettier-config": "^1.5.4",
-		"@opencode-ai/plugin": "^1.18.33",
-		"@types/bun": "^1.4.2",
+		"@types/bun": "^1.4.4",
 		"prettier": "^3.9.9",
 		"typescript": "^7.0.2"
 	}

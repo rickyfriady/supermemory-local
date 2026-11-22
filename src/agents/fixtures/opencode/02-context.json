@@ -1,0 +1,10 @@
+{
+	"_note": "ctx.session.hook('context') event, observed 2x in one turn (once per model request). system/messages trimmed.",
+	"sessionID": "ses_e1cea33bfffepfrdy1JKuE7EJJ",
+	"agent": "build",
+	"model": { "providerID": "9router", "id": "COMBO-WITHOUT-CLAUDE" },
+	"system": [{ "type": "text", "text": "You are an AI agent running in OpenCode, a coding agent harness. ..." }],
+	"messages": [],
+	"options": {},
+	"tools": {}
+}

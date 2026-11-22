@@ -1,12 +1,14 @@
 // Zed edit-prediction adapter: OpenAI legacy /v1/completions -> 9router /chat/completions.
 // Zed's open_ai_compatible_api provider sends {prompt} to /v1/completions; 9router has no such route and
 // ignores `prompt` on /chat/completions (empty `messages` -> Gemini 400 "contents is not specified").
-// Usage: OPENAI_BASE_URL=http://127.0.0.1:20128/v1 ZED_ADAPTER_PORT=20130 OPENAI_API_KEY=... bun src/zed-adapter.ts
+// Settings come from src/config.ts (.env): OPENAI_BASE_URL, OPENAI_API_KEY, ZED_ADAPTER_PORT, ZED_ADAPTER_REASONING_EFFORT.
+import { currentConfig } from './config.ts';
 
-const TARGET = process.env.OPENAI_BASE_URL!.replace(/\/$/, '');
-const API_KEY = process.env.OPENAI_API_KEY;
-const PORT = Number(process.env.ZED_ADAPTER_PORT);
-const REASONING = process.env.ZED_ADAPTER_REASONING_EFFORT;
+const cfg = currentConfig();
+const TARGET = cfg.llmUpstream;
+const API_KEY = cfg.llmApiKey || undefined;
+const PORT = cfg.zedAdapterPort;
+const REASONING = cfg.zedReasoningEffort;
 
 const START = '<|editable_region_start|>';
 const END = '<|editable_region_end|>';

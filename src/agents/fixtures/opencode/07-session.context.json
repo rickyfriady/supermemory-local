@@ -1,0 +1,103 @@
+{
+	"_note": "ctx.session.context({sessionID}) at session.execution.succeeded (last 3 items). Reply text = content[].text of the last type:assistant item; the trailing type:idle item closes the turn.",
+	"items": [
+		{
+			"id": "msg_1e34e89e8001TG64wS3MTJzFgL",
+			"time": {
+				"created": 1794814937587,
+				"streamed": 1794814941826,
+				"completed": 1794814941854
+			},
+			"type": "assistant",
+			"agent": "build",
+			"model": {
+				"id": "COMBO-WITHOUT-CLAUDE",
+				"providerID": "9router",
+				"variant": "default"
+			},
+			"content": [
+				{
+					"type": "tool",
+					"id": "toolu_call-98068d8d-6c5a-4a17-8c00-4236dc8d92c5",
+					"name": "shell",
+					"executed": false,
+					"state": {
+						"status": "completed",
+						"input": {
+							"command": "echo spike"
+						},
+						"content": [
+							{
+								"type": "text",
+								"text": "spike\n"
+							}
+						],
+						"metadata": {
+							"status": "completed",
+							"truncated": false,
+							"exit": 0
+						}
+					},
+					"time": {
+						"created": 1794814941817,
+						"ran": 1794814941825,
+						"completed": 1794814941853
+					}
+				}
+			],
+			"finish": "tool-calls",
+			"rawFinish": "tool_calls",
+			"cost": 0,
+			"tokens": {
+				"input": 14296,
+				"output": 22,
+				"reasoning": 0,
+				"cache": {
+					"read": 0,
+					"write": 0
+				}
+			}
+		},
+		{
+			"id": "msg_1e34e9aa8001CgE0gy9TW1fYaG",
+			"time": {
+				"created": 1794814941873,
+				"streamed": 1794814945548,
+				"completed": 1794814945549
+			},
+			"type": "assistant",
+			"agent": "build",
+			"model": {
+				"id": "COMBO-WITHOUT-CLAUDE",
+				"providerID": "9router",
+				"variant": "default"
+			},
+			"content": [
+				{
+					"type": "text",
+					"text": "OK"
+				}
+			],
+			"finish": "stop",
+			"rawFinish": "stop",
+			"cost": 0,
+			"tokens": {
+				"input": 14333,
+				"output": 2,
+				"reasoning": 0,
+				"cache": {
+					"read": 0,
+					"write": 0
+				}
+			}
+		},
+		{
+			"id": "msg_1e34ea90f002tzB7P1938evdlI",
+			"time": {
+				"created": 1794814945551
+			},
+			"type": "idle",
+			"outcome": "succeeded"
+		}
+	]
+}

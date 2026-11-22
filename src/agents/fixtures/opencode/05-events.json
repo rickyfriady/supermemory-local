@@ -1,0 +1,19 @@
+{
+	"_note": "ctx.event.subscribe() items: { id, created, type, durable?, location?, data }. Payload is in `data` (v1 used `properties`). Observed live (data keys listed); end-of-turn and compaction names come from strings in the v2.0.26 binary and are not yet observed live (9router models failed). session.execution.succeeded verified 2026-11-16 (see 06/07). Compaction events could not be triggered from `opencode run` (a /compact prompt is sent as plain text), so their data shape is still unobserved.",
+	"observed": {
+		"session.created": ["sessionID", "projectID", "location", "subpath", "slug", "model", "version"],
+		"session.execution.started": ["sessionID"],
+		"session.step.started": ["sessionID", "assistantMessageID", "agent", "model", "started"],
+		"session.step.failed": ["sessionID", "assistantMessageID", "error"],
+		"session.execution.failed": ["sessionID", "error"],
+		"session.execution.succeeded": ["sessionID"]
+	},
+	"from_binary_only": [
+		"session.execution.interrupted",
+		"session.compaction.started",
+		"session.compaction.ended",
+		"session.compaction.failed",
+		"session.compacted",
+		"session.idle"
+	]
+}

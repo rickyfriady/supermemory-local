@@ -95,3 +95,66 @@ test('isEnglish tells English prose from other languages', () => {
 	expect(isEnglish('为什么刷新令牌很快过期')).toBe(false);
 	expect(isEnglish('fix login bug')).toBe(true);
 });
+
+// ---- hooks where the agent's folder has no project (real entrypoint as a subprocess, unreachable memory server, temp HOME)
+function hook(agent: string, action: string, payload: object, env: Record<string, string> = {}) {
+	const home = fs.mkdtempSync(path.join(os.tmpdir(), 'hook-home-'));
+	const r = Bun.spawnSync(['bun', path.join(import.meta.dir, '..', 'bin', 'supermemory-hook.ts'), agent, action], {
+		stdin: new Blob([JSON.stringify(payload)]),
+		env: {
+			...process.env,
+			HOME: home,
+			SUPERMEMORY_DATA_DIR: path.join(home, 'data'),
+			SUPERMEMORY_API_URL: 'http://127.0.0.1:1',
+			...env,
+		},
+	});
+	const logFile = path.join(home, '.supermemory-hook.log');
+	const log = fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf-8') : '';
+	fs.rmSync(home, { recursive: true, force: true });
+	return { exit: r.exitCode, out: r.stdout.toString().trim(), log };
+}
+
+function workspace() {
+	const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'hook-ws-')));
+	for (const name of ['alpha', 'beta']) {
+		fs.mkdirSync(path.join(root, name));
+		Bun.spawnSync(['git', 'init', '-q'], { cwd: path.join(root, name) });
+	}
+	return root;
+}
+
+test('start in a folder of repositories injects only a hint saying memory is per repository', () => {
+	const root = workspace();
+	const claude = hook('claude-code', 'start', { cwd: root });
+	expect(claude.exit).toBe(0);
+	expect(claude.out).toContain('# Shared Project Memory: (no project)');
+	expect(claude.out).toContain('alpha, beta');
+	// agy always gets a JSON object, here carrying the hint as a persistent system message
+	const agy = JSON.parse(hook('antigravity', 'start', { cwd: root }).out);
+	expect(agy.injectSteps[0].systemMessage.systemMessage).toContain('(no project)');
+	fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('hooks in an ignored folder print nothing (agy: {})', () => {
+	const root = workspace();
+	const env = { SUPERMEMORY_IGNORE: 'hook-ws-' };
+	expect(hook('claude-code', 'start', { cwd: root }, env).out).toBe('');
+	expect(hook('antigravity', 'start', { cwd: root }, env).out).toBe('{}');
+	fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('a change made from a folder of repositories goes to the repository that owns the file, or is dropped', () => {
+	const root = workspace();
+	const edit = (file: string) => ({ cwd: root, tool_name: 'Edit', tool_input: { file_path: file } });
+	const owned = hook('claude-code', 'change', edit(path.join(root, 'alpha', 'src', 'new-file.ts')));
+	expect(owned.log).toContain(`Project: alpha (${path.join(root, 'alpha')})`);
+	const stray = hook('claude-code', 'change', edit(path.join(root, 'notes.md')));
+	expect(stray.log).toContain('No project for');
+	expect(stray.log).not.toContain('Saving');
+	// summaries have no file to route by: nothing is stored
+	expect(hook('claude-code', 'stop', { cwd: root, last_assistant_message: 'a long enough reply to be stored' }).log).toContain(
+		'No project for',
+	);
+	fs.rmSync(root, { recursive: true, force: true });
+});

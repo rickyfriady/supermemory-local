@@ -1,8 +1,14 @@
 // Unit checks for the MCP server: protocol handling, input validation, and API failures as tool errors: bun test
 import { expect, test } from 'bun:test';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { handleLine, handleMessage } from './mcp-server.ts';
 import { resolveProject } from './project-resolver.ts';
 import { SupermemoryClient } from './supermemory-client.ts';
+
+// The project registry lives in the data dir: keep tests out of the real one
+process.env.SUPERMEMORY_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-data-'));
 
 const call = (name: string, args: unknown, makeClient?: () => SupermemoryClient) =>
 	handleMessage({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }, makeClient) as Promise<any>;
@@ -66,7 +72,7 @@ test('search uses the hooks container tag and renders hits', async () => {
 	expect(res.result.content[0].text).toContain('gateway port is 6276');
 	expect(sent[0].urlPath).toBe('/v4/search');
 	expect(sent[0].body).toMatchObject({
-		containerTag: resolveProject(import.meta.dir).containerTag,
+		containerTag: resolveProject(import.meta.dir)!.containerTag,
 		limit: 3,
 		searchMode: 'hybrid',
 	});
@@ -80,7 +86,7 @@ test('add tags the document and returns its ID', async () => {
 		() => client,
 	);
 	expect(res.result.content[0].text).toContain('doc1');
-	expect(sent[0].body.containerTags).toEqual([resolveProject(import.meta.dir).containerTag]);
+	expect(sent[0].body.containerTags).toEqual([resolveProject(import.meta.dir)!.containerTag]);
 	expect(sent[0].body.metadata).toMatchObject({ type: 'note', agent: 'MCP' });
 });
 
@@ -111,4 +117,49 @@ test('memory server down is a tool error, not a crash or an empty result', async
 		expect(res.result.isError).toBe(true);
 		expect(res.result.content[0].text).toContain('Memory server');
 	}
+});
+
+test("clones of one remote share memory: search reads every clone's tag, add writes the shared tag", async () => {
+	const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-clones-')));
+	const clone = (parent: string) => {
+		const dir = path.join(root, parent, 'app');
+		fs.mkdirSync(dir, { recursive: true });
+		for (const args of [
+			['init', '-q'],
+			['remote', 'add', 'origin', 'git@repo.example:team/app.git'],
+		])
+			Bun.spawnSync(['git', ...args], { cwd: dir });
+		return dir;
+	};
+	const a = clone('one');
+	const b = clone('two');
+	const tagA = resolveProject(a)!.containerTag;
+	const tagB = resolveProject(b)!.containerTag;
+	expect(tagB).toBe(tagA);
+
+	const search = fakeClient({ results: [{ id: 'm', memory: 'note from the other clone', similarity: 0.9 }] });
+	const found = await call('search', { project_path: b, query: 'what did the other clone note' }, () => search.client);
+	expect(found.result.content[0].text).toContain('note from the other clone');
+	// one /v4/search per tag (the server's search is single-space): both clones' own tags are read
+	expect(search.sent.map((c) => c.body.containerTag).sort()).toEqual(resolveProject(b)!.readTags.slice().sort());
+	expect(search.sent).toHaveLength(2);
+
+	const add = fakeClient({ id: 'doc2', status: 'queued' });
+	await call('add', { project_path: b, content: 'a note written from the second clone' }, () => add.client);
+	expect(add.sent[0].body.containerTags).toEqual([tagA]);
+	fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('a folder that only holds repositories is a tool error naming them', async () => {
+	const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-container-')));
+	for (const name of ['alpha', 'beta']) {
+		fs.mkdirSync(path.join(root, name));
+		Bun.spawnSync(['git', 'init', '-q'], { cwd: path.join(root, name) });
+	}
+	const { client, sent } = fakeClient({});
+	const res = await call('search', { project_path: root, query: 'anything at all here' }, () => client);
+	expect(res.result.isError).toBe(true);
+	expect(res.result.content[0].text).toContain('alpha, beta');
+	expect(sent).toEqual([]);
+	fs.rmSync(root, { recursive: true, force: true });
 });

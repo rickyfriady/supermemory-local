@@ -1,0 +1,8 @@
+{
+	"_note": "ctx.session.get({ sessionID }) result. location.directory is the per-session working directory (ctx.location is the plugin instance's, not the session's).",
+	"id": "ses_e1cea33bfffepfrdy1JKuE7EJJ",
+	"projectID": "1e710252c9aaa3e8192c64d42e4046e437dfcf6c",
+	"title": "OK",
+	"time": { "created": 1794811219262, "updated": 1794811224911 },
+	"location": { "directory": "/work/project" }
+}

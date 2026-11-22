@@ -211,7 +211,7 @@ test('linkMemories maps notes to sessions by metadata.session', async () => {
 		isHealthy: async () => true,
 		// notes of project /a only; /b has none
 		listDocuments: async ({ containerTags = [] }: { containerTags?: string[] }) =>
-			containerTags[0] === resolveProject('/a').containerTag
+			containerTags[0] === resolveProject('/a')!.containerTag
 				? [doc('d1', ID_A), doc('d2', ID_A, 'change_observation'), doc('d3', ID_B), { id: 'd4', createdAt: '', metadata: {} }]
 				: [],
 		getDocument: async () => null,
